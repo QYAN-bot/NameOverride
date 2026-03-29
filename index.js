@@ -1,55 +1,51 @@
 /**
- * Name Override — SillyTavern Extension
+ * Name Override — SillyTavern Extension v2
  *
- * Replaces {{char}} / {{user}} resolved names in the prompt sent to the API.
- * Settings are saved per character card.
+ * Replaces resolved char/user names in the prompt sent to the API.
+ * Settings are saved per character card (keyed by avatar filename).
  *
- * NOTE: Import paths assume the standard ST third-party extension location:
- *   public/scripts/extensions/third-party/name-override/
- * If your ST version uses a different layout, adjust the relative paths.
+ * Uses generate_interceptor (declared in manifest.json) as the primary
+ * prompt hook, plus CHAT_COMPLETION_PROMPT_READY as a secondary hook
+ * for Chat Completion APIs.
  */
 
-import { extension_settings, getContext } from '../../../extensions.js';
-import { eventSource, event_types, saveSettingsDebounced } from '../../../../script.js';
-
-const EXT_NAME = 'name-override';
+const MODULE_NAME = 'name_override';
 
 // ── helpers ──────────────────────────────────────────────────────────
 
-/** Escape special regex chars in a string */
 function escapeRegex(str) {
     return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-/** Get a stable per-character key (avatar filename) */
 function getCharKey() {
-    const ctx = getContext();
-    const char = ctx?.characters?.[ctx.characterId];
-    // avatar is the most stable unique id for a character card in ST
+    const ctx = SillyTavern.getContext();
+    const char = ctx.characters?.[ctx.characterId];
     return char?.avatar ?? null;
 }
 
-/** Read overrides for current character */
+function getSettings() {
+    const { extensionSettings } = SillyTavern.getContext();
+    if (!extensionSettings[MODULE_NAME]) {
+        extensionSettings[MODULE_NAME] = {};
+    }
+    return extensionSettings[MODULE_NAME];
+}
+
 function getOverrides() {
     const key = getCharKey();
     if (!key) return { charName: '', userName: '' };
-    return extension_settings[EXT_NAME]?.[key] ?? { charName: '', userName: '' };
+    const settings = getSettings();
+    return settings[key] ?? { charName: '', userName: '' };
 }
 
-/** Save overrides for current character */
 function saveOverrides(charName, userName) {
     const key = getCharKey();
     if (!key) return;
-    if (!extension_settings[EXT_NAME]) extension_settings[EXT_NAME] = {};
-    extension_settings[EXT_NAME][key] = { charName, userName };
-    saveSettingsDebounced();
+    const settings = getSettings();
+    settings[key] = { charName, userName };
+    SillyTavern.getContext().saveSettingsDebounced();
 }
 
-/**
- * Replace `original` with `replacement` in text, using word-boundary regex.
- * Falls back to plain replaceAll if the name contains characters that make
- * word-boundary matching unreliable (e.g. names ending in non-word chars).
- */
 function replaceName(text, original, replacement) {
     if (!text || !original || !replacement) return text;
     if (original === replacement) return text;
@@ -61,21 +57,20 @@ function replaceName(text, original, replacement) {
     }
 }
 
-/** Apply both char & user name replacements to a string */
 function applyReplacements(text, origChar, origUser, newChar, newUser) {
+    if (typeof text !== 'string') return text;
     if (newChar) text = replaceName(text, origChar, newChar);
     if (newUser) text = replaceName(text, origUser, newUser);
     return text;
 }
 
-// ── prompt hooks ─────────────────────────────────────────────────────
+// ── generate_interceptor (primary hook) ──────────────────────────────
+// This global function is called by ST before prompt construction.
+// It receives the chat message array. We use structuredClone to avoid
+// permanently modifying chat history.
 
-/**
- * Hook for Chat Completion APIs (OpenAI-compatible).
- * Event data is expected to be { messages: [...] } or { chat: [...] }.
- */
-function onChatCompletionReady(data) {
-    const ctx = getContext();
+globalThis.nameOverrideInterceptor = async function (chat, contextSize, abort, type) {
+    const ctx = SillyTavern.getContext();
     if (!ctx) return;
 
     const { charName, userName } = getOverrides();
@@ -86,16 +81,57 @@ function onChatCompletionReady(data) {
     const origChar = ctx.name2;
     const origUser = ctx.name1;
 
-    // ST versions may use different property names
+    for (let i = 0; i < chat.length; i++) {
+        const msg = chat[i];
+
+        // Check if this message needs any changes
+        const mesNeedsChange = typeof msg.mes === 'string' &&
+            ((newChar && msg.mes.includes(origChar)) ||
+             (newUser && msg.mes.includes(origUser)));
+        const nameNeedsChange =
+            (newChar && msg.name === origChar) ||
+            (newUser && msg.name === origUser);
+
+        if (!mesNeedsChange && !nameNeedsChange) continue;
+
+        // Clone to avoid permanently changing chat history
+        const clone = structuredClone(msg);
+
+        if (typeof clone.mes === 'string') {
+            clone.mes = applyReplacements(clone.mes, origChar, origUser, newChar, newUser);
+        }
+        if (clone.name) {
+            if (newChar && clone.name === origChar) clone.name = newChar;
+            if (newUser && clone.name === origUser) clone.name = newUser;
+        }
+
+        chat[i] = clone;
+    }
+};
+
+// ── CHAT_COMPLETION_PROMPT_READY (secondary hook for CC APIs) ────────
+// This catches the final messages array for Chat Completion APIs
+// after all prompt construction is done, as a safety net.
+
+function onChatCompletionPromptReady(data) {
+    const ctx = SillyTavern.getContext();
+    if (!ctx) return;
+
+    const { charName, userName } = getOverrides();
+    const newChar = charName?.trim();
+    const newUser = userName?.trim();
+    if (!newChar && !newUser) return;
+
+    const origChar = ctx.name2;
+    const origUser = ctx.name1;
+
     const messages = data?.messages ?? data?.chat;
     if (!Array.isArray(messages)) return;
 
     for (const msg of messages) {
-        // Replace inside message content
         if (typeof msg.content === 'string') {
             msg.content = applyReplacements(msg.content, origChar, origUser, newChar, newUser);
         }
-        // Also handle content arrays (vision messages etc.)
         if (Array.isArray(msg.content)) {
             for (const part of msg.content) {
                 if (part.type === 'text' && typeof part.text === 'string') {
@@ -103,7 +139,6 @@ function onChatCompletionReady(data) {
                 }
             }
         }
-        // Replace the name field if present
         if (msg.name) {
             if (newChar && msg.name === origChar) msg.name = newChar;
             if (newUser && msg.name === origUser) msg.name = newUser;
@@ -111,13 +146,11 @@ function onChatCompletionReady(data) {
     }
 }
 
-/**
- * Hook for Text Completion APIs.
- * Event data is expected to be { prompt: "..." } or a plain string
- * (depending on ST version).
- */
+// ── GENERATE_AFTER_COMBINE_PROMPTS (secondary hook for TC APIs) ──────
+// For Text Completion APIs, the prompt is a combined string.
+
 function onGenerateAfterCombine(data) {
-    const ctx = getContext();
+    const ctx = SillyTavern.getContext();
     if (!ctx) return;
 
     const { charName, userName } = getOverrides();
@@ -129,7 +162,6 @@ function onGenerateAfterCombine(data) {
     const origUser = ctx.name1;
 
     if (typeof data === 'object' && data !== null) {
-        // Try common property names
         for (const key of ['prompt', 'data', 'text']) {
             if (typeof data[key] === 'string') {
                 data[key] = applyReplacements(data[key], origChar, origUser, newChar, newUser);
@@ -145,23 +177,23 @@ function updateUI() {
     $('#name_override_char').val(overrides.charName || '');
     $('#name_override_user').val(overrides.userName || '');
 
-    // Show current default names as placeholder hints
-    const ctx = getContext();
+    const ctx = SillyTavern.getContext();
     if (ctx) {
-        $('#name_override_char').attr('placeholder', ctx.name2 || '(char name)');
-        $('#name_override_user').attr('placeholder', ctx.name1 || '(user name)');
+        $('#name_override_char').attr('placeholder', ctx.name2 || '(char)');
+        $('#name_override_user').attr('placeholder', ctx.name1 || '(user)');
     }
 }
 
 // ── init ─────────────────────────────────────────────────────────────
 
-jQuery(async () => {
-    // Ensure settings object exists
-    if (!extension_settings[EXT_NAME]) {
-        extension_settings[EXT_NAME] = {};
-    }
+(function init() {
+    const ctx = SillyTavern.getContext();
+    const { eventSource, event_types } = ctx;
 
-    // Inject settings panel HTML
+    // Ensure settings object exists
+    getSettings();
+
+    // Inject settings panel
     const settingsHtml = `
     <div id="name_override_settings">
         <div class="inline-drawer">
@@ -172,24 +204,24 @@ jQuery(async () => {
             <div class="inline-drawer-content">
                 <div class="name_override_field">
                     <label for="name_override_char">
-                        <span>{{char}} → </span>
+                        <span>char →</span>
                     </label>
                     <input id="name_override_char" type="text" class="text_pole" />
                 </div>
                 <div class="name_override_field">
                     <label for="name_override_user">
-                        <span>{{user}} → </span>
+                        <span>user →</span>
                     </label>
                     <input id="name_override_user" type="text" class="text_pole" />
                 </div>
                 <small class="name_override_hint">
-                    Leave empty = use default. Saved per character card.
+                    Leave empty = use default name. Saved per character card.
                 </small>
             </div>
         </div>
     </div>`;
 
-    $('#extensions_settings').append(settingsHtml);
+    $('#extensions_settings2').append(settingsHtml);
 
     // Bind input events
     $('#name_override_char').on('input', function () {
@@ -202,14 +234,14 @@ jQuery(async () => {
     // Sync UI when switching chats / characters
     eventSource.on(event_types.CHAT_CHANGED, updateUI);
 
-    // Register prompt hooks
+    // Register secondary event hooks
     if (event_types.CHAT_COMPLETION_PROMPT_READY) {
-        eventSource.on(event_types.CHAT_COMPLETION_PROMPT_READY, onChatCompletionReady);
+        eventSource.on(event_types.CHAT_COMPLETION_PROMPT_READY, onChatCompletionPromptReady);
     }
-    if (event_types.GENERATE_AFTER_COMBINE) {
-        eventSource.on(event_types.GENERATE_AFTER_COMBINE, onGenerateAfterCombine);
+    if (event_types.GENERATE_AFTER_COMBINE_PROMPTS) {
+        eventSource.on(event_types.GENERATE_AFTER_COMBINE_PROMPTS, onGenerateAfterCombine);
     }
 
-    console.log(`[${EXT_NAME}] loaded`);
+    console.log(`[${MODULE_NAME}] Extension loaded`);
     updateUI();
-});
+})();

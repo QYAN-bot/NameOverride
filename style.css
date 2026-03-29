@@ -8,7 +8,7 @@
 }
 
 #name_override_settings .name_override_field label {
-    min-width: 80px;
+    min-width: 60px;
     white-space: nowrap;
     font-family: monospace;
     font-size: 0.9em;
