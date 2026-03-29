@@ -1,5 +1,3 @@
-/* Name Override extension styles */
-
 #name_override_settings .name_override_field {
     display: flex;
     align-items: center;
@@ -8,7 +6,7 @@
 }
 
 #name_override_settings .name_override_field label {
-    min-width: 60px;
+    min-width: 55px;
     white-space: nowrap;
     font-family: monospace;
     font-size: 0.9em;
