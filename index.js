@@ -1,12 +1,13 @@
 /**
- * Name Override — SillyTavern Extension v3
+ * Name Override — SillyTavern Extension v4
  *
- * Replaces resolved char/user names in prompts AND permanently in chat history.
- * Settings saved per character card (keyed by avatar filename).
+ * Strategy:
+ *   1. generate_interceptor → permanently modifies chat history messages
+ *   2. fetch monkey-patch → replaces names in the actual HTTP request body
+ *      sent to the ST server, guaranteeing the API sees correct names
  */
 
 const MODULE_NAME = 'name_override';
-// Set to true to show toastr debug messages; flip to false once it works
 const DEBUG = true;
 
 function dbg(msg) {
@@ -49,6 +50,7 @@ function saveOverrides(charName, userName) {
 
 function replaceName(text, original, replacement) {
     if (!text || !original || !replacement || original === replacement) return text;
+    // Use word boundary for latin names; fallback to replaceAll
     try {
         return text.replace(new RegExp(`\\b${escapeRegex(original)}\\b`, 'g'), replacement);
     } catch {
@@ -63,111 +65,108 @@ function applyReplacements(text, origChar, origUser, newChar, newUser) {
     return text;
 }
 
-// ── generate_interceptor ─────────────────────────────────────────────
-// Global function declared in manifest. Called before each generation.
-// Modifies chat array IN PLACE = permanent change to chat history.
+// ── current replacement context (set before each generation) ─────────
+
+let activeReplacement = null;
+
+function buildReplacementContext() {
+    const ctx = SillyTavern.getContext();
+    const { charName, userName } = getOverrides();
+    const newChar = charName?.trim();
+    const newUser = userName?.trim();
+    if (!newChar && !newUser) return null;
+    return {
+        origChar: ctx.name2,
+        origUser: ctx.name1,
+        newChar: newChar || null,
+        newUser: newUser || null,
+    };
+}
+
+// ── generate_interceptor (permanent chat history modification) ────────
 
 globalThis.nameOverrideInterceptor = async function (chat, contextSize, abort, type) {
-    const ctx = SillyTavern.getContext();
-    const { charName, userName } = getOverrides();
-    const newChar = charName?.trim();
-    const newUser = userName?.trim();
-    if (!newChar && !newUser) return;
+    const rep = buildReplacementContext();
+    if (!rep) { activeReplacement = null; return; }
 
-    const origChar = ctx.name2;
-    const origUser = ctx.name1;
+    // Set active context for the fetch interceptor
+    activeReplacement = rep;
+
     let count = 0;
-
     for (const msg of chat) {
         let changed = false;
-
         if (typeof msg.mes === 'string') {
             const before = msg.mes;
-            msg.mes = applyReplacements(msg.mes, origChar, origUser, newChar, newUser);
+            msg.mes = applyReplacements(msg.mes, rep.origChar, rep.origUser, rep.newChar, rep.newUser);
             if (msg.mes !== before) changed = true;
         }
-
         if (msg.name) {
             const before = msg.name;
-            if (newChar && msg.name === origChar) msg.name = newChar;
-            if (newUser && msg.name === origUser) msg.name = newUser;
+            if (rep.newChar && msg.name === rep.origChar) msg.name = rep.newChar;
+            if (rep.newUser && msg.name === rep.origUser) msg.name = rep.newUser;
             if (msg.name !== before) changed = true;
         }
-
         if (changed) count++;
     }
-
-    if (count > 0) {
-        dbg(`Interceptor: replaced names in ${count} message(s)`);
-    }
+    if (count > 0) dbg(`Chat history: ${count} msg(s) modified`);
 };
 
-// ── CHAT_COMPLETION_PROMPT_READY (for Chat Completion APIs) ──────────
+// ── fetch interceptor (modify actual HTTP request body) ──────────────
 
-function onChatCompletionPromptReady(data) {
-    const ctx = SillyTavern.getContext();
-    const { charName, userName } = getOverrides();
-    const newChar = charName?.trim();
-    const newUser = userName?.trim();
-    if (!newChar && !newUser) return;
+function replaceInObject(obj, rep) {
+    if (!obj || !rep) return;
 
-    const origChar = ctx.name2;
-    const origUser = ctx.name1;
-    const messages = data?.messages ?? data?.chat;
-    if (!Array.isArray(messages)) return;
-
-    let count = 0;
-    for (const msg of messages) {
-        let changed = false;
-
-        if (typeof msg.content === 'string') {
-            const before = msg.content;
-            msg.content = applyReplacements(msg.content, origChar, origUser, newChar, newUser);
-            if (msg.content !== before) changed = true;
-        }
-        if (Array.isArray(msg.content)) {
-            for (const part of msg.content) {
-                if (part.type === 'text' && typeof part.text === 'string') {
-                    const before = part.text;
-                    part.text = applyReplacements(part.text, origChar, origUser, newChar, newUser);
-                    if (part.text !== before) changed = true;
+    // Handle messages array (Chat Completion format)
+    if (Array.isArray(obj.messages)) {
+        for (const msg of obj.messages) {
+            if (typeof msg.content === 'string') {
+                msg.content = applyReplacements(msg.content, rep.origChar, rep.origUser, rep.newChar, rep.newUser);
+            }
+            if (Array.isArray(msg.content)) {
+                for (const part of msg.content) {
+                    if (part?.type === 'text' && typeof part.text === 'string') {
+                        part.text = applyReplacements(part.text, rep.origChar, rep.origUser, rep.newChar, rep.newUser);
+                    }
                 }
             }
+            if (msg.name) {
+                if (rep.newChar && msg.name === rep.origChar) msg.name = rep.newChar;
+                if (rep.newUser && msg.name === rep.origUser) msg.name = rep.newUser;
+            }
         }
-        if (msg.name) {
-            const before = msg.name;
-            if (newChar && msg.name === origChar) msg.name = newChar;
-            if (newUser && msg.name === origUser) msg.name = newUser;
-            if (msg.name !== before) changed = true;
-        }
-        if (changed) count++;
     }
 
-    if (count > 0) {
-        dbg(`CC prompt: replaced names in ${count} message(s)`);
+    // Handle prompt string (Text Completion format)
+    if (typeof obj.prompt === 'string') {
+        obj.prompt = applyReplacements(obj.prompt, rep.origChar, rep.origUser, rep.newChar, rep.newUser);
     }
 }
 
-// ── GENERATE_AFTER_COMBINE_PROMPTS (for Text Completion APIs) ────────
+const originalFetch = window.fetch;
 
-function onGenerateAfterCombine(data) {
-    const ctx = SillyTavern.getContext();
-    const { charName, userName } = getOverrides();
-    const newChar = charName?.trim();
-    const newUser = userName?.trim();
-    if (!newChar && !newUser) return;
+window.fetch = async function (input, init) {
+    // Only intercept if we have an active replacement context
+    if (activeReplacement && init?.body && typeof init.body === 'string') {
+        try {
+            const body = JSON.parse(init.body);
 
-    const origChar = ctx.name2;
-    const origUser = ctx.name1;
-
-    if (typeof data === 'object' && data !== null) {
-        for (const key of ['prompt', 'data', 'text']) {
-            if (typeof data[key] === 'string') {
-                data[key] = applyReplacements(data[key], origChar, origUser, newChar, newUser);
+            // Check if this looks like a generation request
+            if (body.messages || body.prompt) {
+                replaceInObject(body, activeReplacement);
+                init = { ...init, body: JSON.stringify(body) };
+                dbg('Fetch: replaced names in request body');
             }
+        } catch {
+            // Not JSON or parse error — skip
         }
-        dbg('TC prompt: applied replacements');
     }
+
+    return originalFetch.call(this, input, init);
+};
+
+// Clear active replacement after generation ends
+function onGenerationEnded() {
+    activeReplacement = null;
 }
 
 // ── UI ───────────────────────────────────────────────────────────────
@@ -190,10 +189,8 @@ jQuery(async () => {
     const ctx = SillyTavern.getContext();
     const { eventSource, event_types } = ctx;
 
-    // Ensure settings object
     getSettings();
 
-    // Settings panel HTML
     const settingsHtml = `
     <div id="name_override_settings">
         <div class="inline-drawer">
@@ -211,19 +208,17 @@ jQuery(async () => {
                     <input id="name_override_user" type="text" class="text_pole" />
                 </div>
                 <small class="name_override_hint">
-                    Leave empty = default name. Saved per character.
+                    Leave empty = default. Saved per character.
                 </small>
             </div>
         </div>
     </div>`;
 
-    // Try both known settings containers
     const $container = $('#extensions_settings2').length
         ? $('#extensions_settings2')
         : $('#extensions_settings');
     $container.append(settingsHtml);
 
-    // Bind input events
     $('#name_override_char').on('input', function () {
         saveOverrides($(this).val(), $('#name_override_user').val());
     });
@@ -231,16 +226,8 @@ jQuery(async () => {
         saveOverrides($('#name_override_char').val(), $(this).val());
     });
 
-    // Update UI on chat switch
     eventSource.on(event_types.CHAT_CHANGED, updateUI);
-
-    // Register event hooks as secondary coverage
-    eventSource.on(event_types.CHAT_COMPLETION_PROMPT_READY, onChatCompletionPromptReady);
-
-    // This event name uses the string directly as a fallback
-    const afterCombine = event_types.GENERATE_AFTER_COMBINE_PROMPTS
-        ?? 'generate_after_combine_prompts';
-    eventSource.on(afterCombine, onGenerateAfterCombine);
+    eventSource.on(event_types.GENERATION_ENDED, onGenerationEnded);
 
     dbg('Extension loaded OK!');
     updateUI();
