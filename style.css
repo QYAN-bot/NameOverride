@@ -1,0 +1,25 @@
+/* Name Override extension styles */
+
+#name_override_settings .name_override_field {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 8px;
+}
+
+#name_override_settings .name_override_field label {
+    min-width: 80px;
+    white-space: nowrap;
+    font-family: monospace;
+    font-size: 0.9em;
+}
+
+#name_override_settings .name_override_field .text_pole {
+    flex: 1;
+}
+
+#name_override_settings .name_override_hint {
+    display: block;
+    opacity: 0.6;
+    margin-top: 4px;
+}
