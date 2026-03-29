@@ -1,38 +1,33 @@
 /**
- * Name Override — SillyTavern Extension v4
+ * Name Override — SillyTavern Extension v5
  *
- * Strategy:
- *   1. generate_interceptor → permanently modifies chat history messages
- *   2. fetch monkey-patch → replaces names in the actual HTTP request body
- *      sent to the ST server, guaranteeing the API sees correct names
+ * Makes {{char}}/{{user}} resolve to custom names by overriding the data sources.
+ * Three strategies applied simultaneously:
+ *   A. registerMacro('char'/'user', ...) → override macro resolution
+ *   B. characters[id].name modification → override the name2 data source
+ *   C. fetch interceptor → ultimate fallback on the HTTP request
  */
 
 const MODULE_NAME = 'name_override';
 const DEBUG = true;
 
 function dbg(msg) {
-    if (DEBUG) toastr.info(msg, 'Name Override', { timeOut: 3000 });
+    if (DEBUG) toastr.info(msg, 'NameOvr', { timeOut: 2500 });
     console.log(`[${MODULE_NAME}] ${msg}`);
 }
 
-// ── helpers ──────────────────────────────────────────────────────────
+// ── settings ─────────────────────────────────────────────────────────
 
-function escapeRegex(str) {
-    return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+function getSettings() {
+    const { extensionSettings } = SillyTavern.getContext();
+    if (!extensionSettings[MODULE_NAME]) extensionSettings[MODULE_NAME] = {};
+    return extensionSettings[MODULE_NAME];
 }
 
 function getCharKey() {
     const ctx = SillyTavern.getContext();
     const char = ctx.characters?.[ctx.characterId];
     return char?.avatar ?? null;
-}
-
-function getSettings() {
-    const { extensionSettings } = SillyTavern.getContext();
-    if (!extensionSettings[MODULE_NAME]) {
-        extensionSettings[MODULE_NAME] = {};
-    }
-    return extensionSettings[MODULE_NAME];
 }
 
 function getOverrides() {
@@ -48,9 +43,125 @@ function saveOverrides(charName, userName) {
     SillyTavern.getContext().saveSettingsDebounced();
 }
 
+// ── state tracking ───────────────────────────────────────────────────
+// We track the original character name so we can restore it when
+// switching to another character (prevents polluting the char card data)
+
+let originalCharName = null;  // original characters[id].name
+let currentCharId = null;     // characterId we modified
+let macrosRegistered = false;
+
+// ── Strategy A: Macro registration ───────────────────────────────────
+
+function registerMacroOverrides() {
+    const { charName, userName } = getOverrides();
+    const newChar = charName?.trim();
+    const newUser = userName?.trim();
+    const ctx = SillyTavern.getContext();
+
+    // Try new macro engine first (ST 1.17+)
+    if (ctx.macros?.register) {
+        try {
+            if (newChar) {
+                ctx.macros.register('char', {
+                    description: 'Name Override: custom char name',
+                    handler: () => newChar,
+                });
+                dbg(`A1: macros.register char → ${newChar}`);
+            }
+            if (newUser) {
+                ctx.macros.register('user', {
+                    description: 'Name Override: custom user name',
+                    handler: () => newUser,
+                });
+                dbg(`A1: macros.register user → ${newUser}`);
+            }
+            macrosRegistered = true;
+            return;
+        } catch (e) {
+            dbg(`A1 failed: ${e.message}`);
+        }
+    }
+
+    // Fallback: legacy registerMacro (deprecated but widely supported)
+    if (ctx.registerMacro) {
+        try {
+            if (newChar) {
+                ctx.registerMacro('char', newChar);
+                dbg(`A2: registerMacro char → ${newChar}`);
+            }
+            if (newUser) {
+                ctx.registerMacro('user', newUser);
+                dbg(`A2: registerMacro user → ${newUser}`);
+            }
+            macrosRegistered = true;
+            return;
+        } catch (e) {
+            dbg(`A2 failed: ${e.message}`);
+        }
+    }
+
+    dbg('A: no macro API available');
+}
+
+function unregisterMacroOverrides() {
+    if (!macrosRegistered) return;
+    const ctx = SillyTavern.getContext();
+
+    try {
+        if (ctx.macros?.registry?.unregisterMacro) {
+            ctx.macros.registry.unregisterMacro('char');
+            ctx.macros.registry.unregisterMacro('user');
+        } else if (ctx.unregisterMacro) {
+            ctx.unregisterMacro('char');
+            ctx.unregisterMacro('user');
+        }
+    } catch (e) {
+        // Might fail if they weren't registered; that's fine
+    }
+    macrosRegistered = false;
+}
+
+// ── Strategy B: Direct character name modification ───────────────────
+
+function applyCharacterNameOverride() {
+    const ctx = SillyTavern.getContext();
+    const charId = ctx.characterId;
+    if (charId == null || !ctx.characters?.[charId]) return;
+
+    const { charName } = getOverrides();
+    const newChar = charName?.trim();
+
+    // Restore previous character's name if we switched
+    restoreCharacterName();
+
+    if (newChar) {
+        originalCharName = ctx.characters[charId].name;
+        currentCharId = charId;
+        ctx.characters[charId].name = newChar;
+        dbg(`B: char name → "${newChar}" (was "${originalCharName}")`);
+    }
+}
+
+function restoreCharacterName() {
+    if (originalCharName != null && currentCharId != null) {
+        const ctx = SillyTavern.getContext();
+        if (ctx.characters?.[currentCharId]) {
+            ctx.characters[currentCharId].name = originalCharName;
+        }
+        originalCharName = null;
+        currentCharId = null;
+    }
+}
+
+// ── Strategy C: Fetch interceptor (fallback) ─────────────────────────
+
+function escapeRegex(str) {
+    return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 function replaceName(text, original, replacement) {
     if (!text || !original || !replacement || original === replacement) return text;
-    // Use word boundary for latin names; fallback to replaceAll
     try {
         return text.replace(new RegExp(`\\b${escapeRegex(original)}\\b`, 'g'), replacement);
     } catch {
@@ -58,115 +169,48 @@ function replaceName(text, original, replacement) {
     }
 }
 
-function applyReplacements(text, origChar, origUser, newChar, newUser) {
-    if (typeof text !== 'string') return text;
-    if (newChar) text = replaceName(text, origChar, newChar);
-    if (newUser) text = replaceName(text, origUser, newUser);
-    return text;
-}
+const originalFetch = window.fetch;
+window.fetch = async function (input, init) {
+    if (init?.body && typeof init.body === 'string') {
+        try {
+            const body = JSON.parse(init.body);
+            if (body.messages || body.prompt) {
+                const { charName, userName } = getOverrides();
+                const newChar = charName?.trim();
+                const newUser = userName?.trim();
+                if (newChar || newUser) {
+                    // We need original names for replacement. Since we may have
+                    // already changed characters[].name, use our saved original.
+                    const origChar = originalCharName || '';
+                    const ctx = SillyTavern.getContext();
+                    const origUser = ctx.name1;
 
-// ── current replacement context (set before each generation) ─────────
-
-let activeReplacement = null;
-
-function buildReplacementContext() {
-    const ctx = SillyTavern.getContext();
-    const { charName, userName } = getOverrides();
-    const newChar = charName?.trim();
-    const newUser = userName?.trim();
-    if (!newChar && !newUser) return null;
-    return {
-        origChar: ctx.name2,
-        origUser: ctx.name1,
-        newChar: newChar || null,
-        newUser: newUser || null,
-    };
-}
-
-// ── generate_interceptor (permanent chat history modification) ────────
-
-globalThis.nameOverrideInterceptor = async function (chat, contextSize, abort, type) {
-    const rep = buildReplacementContext();
-    if (!rep) { activeReplacement = null; return; }
-
-    // Set active context for the fetch interceptor
-    activeReplacement = rep;
-
-    let count = 0;
-    for (const msg of chat) {
-        let changed = false;
-        if (typeof msg.mes === 'string') {
-            const before = msg.mes;
-            msg.mes = applyReplacements(msg.mes, rep.origChar, rep.origUser, rep.newChar, rep.newUser);
-            if (msg.mes !== before) changed = true;
-        }
-        if (msg.name) {
-            const before = msg.name;
-            if (rep.newChar && msg.name === rep.origChar) msg.name = rep.newChar;
-            if (rep.newUser && msg.name === rep.origUser) msg.name = rep.newUser;
-            if (msg.name !== before) changed = true;
-        }
-        if (changed) count++;
-    }
-    if (count > 0) dbg(`Chat history: ${count} msg(s) modified`);
-};
-
-// ── fetch interceptor (modify actual HTTP request body) ──────────────
-
-function replaceInObject(obj, rep) {
-    if (!obj || !rep) return;
-
-    // Handle messages array (Chat Completion format)
-    if (Array.isArray(obj.messages)) {
-        for (const msg of obj.messages) {
-            if (typeof msg.content === 'string') {
-                msg.content = applyReplacements(msg.content, rep.origChar, rep.origUser, rep.newChar, rep.newUser);
-            }
-            if (Array.isArray(msg.content)) {
-                for (const part of msg.content) {
-                    if (part?.type === 'text' && typeof part.text === 'string') {
-                        part.text = applyReplacements(part.text, rep.origChar, rep.origUser, rep.newChar, rep.newUser);
+                    const bodyStr = init.body;
+                    let newBodyStr = bodyStr;
+                    if (newChar && origChar) {
+                        newBodyStr = replaceName(newBodyStr, origChar, newChar);
+                    }
+                    if (newUser && origUser) {
+                        newBodyStr = replaceName(newBodyStr, origUser, newUser);
+                    }
+                    if (newBodyStr !== bodyStr) {
+                        init = { ...init, body: newBodyStr };
+                        dbg('C: fetch body replaced');
                     }
                 }
             }
-            if (msg.name) {
-                if (rep.newChar && msg.name === rep.origChar) msg.name = rep.newChar;
-                if (rep.newUser && msg.name === rep.origUser) msg.name = rep.newUser;
-            }
-        }
+        } catch { /* not JSON */ }
     }
-
-    // Handle prompt string (Text Completion format)
-    if (typeof obj.prompt === 'string') {
-        obj.prompt = applyReplacements(obj.prompt, rep.origChar, rep.origUser, rep.newChar, rep.newUser);
-    }
-}
-
-const originalFetch = window.fetch;
-
-window.fetch = async function (input, init) {
-    // Only intercept if we have an active replacement context
-    if (activeReplacement && init?.body && typeof init.body === 'string') {
-        try {
-            const body = JSON.parse(init.body);
-
-            // Check if this looks like a generation request
-            if (body.messages || body.prompt) {
-                replaceInObject(body, activeReplacement);
-                init = { ...init, body: JSON.stringify(body) };
-                dbg('Fetch: replaced names in request body');
-            }
-        } catch {
-            // Not JSON or parse error — skip
-        }
-    }
-
     return originalFetch.call(this, input, init);
 };
 
-// Clear active replacement after generation ends
-function onGenerationEnded() {
-    activeReplacement = null;
+// ── apply all strategies ─────────────────────────────────────────────
+
+function applyAllOverrides() {
+    unregisterMacroOverrides();
+    registerMacroOverrides();    // Strategy A
+    applyCharacterNameOverride(); // Strategy B
+    // Strategy C is always active via fetch patch
 }
 
 // ── UI ───────────────────────────────────────────────────────────────
@@ -176,11 +220,34 @@ function updateUI() {
     $('#name_override_char').val(overrides.charName || '');
     $('#name_override_user').val(overrides.userName || '');
 
+    // Show original name as placeholder
+    // Use saved original if we've already overridden, otherwise read current
     const ctx = SillyTavern.getContext();
-    if (ctx) {
-        $('#name_override_char').attr('placeholder', ctx.name2 || '(char)');
-        $('#name_override_user').attr('placeholder', ctx.name1 || '(user)');
-    }
+    const displayOrigChar = originalCharName || ctx.name2 || '(char)';
+    const displayOrigUser = ctx.name1 || '(user)';
+    $('#name_override_char').attr('placeholder', displayOrigChar);
+    $('#name_override_user').attr('placeholder', displayOrigUser);
+}
+
+// ── lifecycle ────────────────────────────────────────────────────────
+
+function onChatChanged() {
+    // When switching characters, first restore the old one
+    restoreCharacterName();
+    // Then apply overrides for the new character
+    applyAllOverrides();
+    updateUI();
+}
+
+function onSettingsInput() {
+    const charVal = $('#name_override_char').val();
+    const userVal = $('#name_override_user').val();
+    saveOverrides(charVal, userVal);
+
+    // Re-apply after settings change
+    restoreCharacterName();
+    applyAllOverrides();
+    updateUI();
 }
 
 // ── init ─────────────────────────────────────────────────────────────
@@ -208,7 +275,7 @@ jQuery(async () => {
                     <input id="name_override_user" type="text" class="text_pole" />
                 </div>
                 <small class="name_override_hint">
-                    Leave empty = default. Saved per character.
+                    Leave empty = default. Saved per character card.
                 </small>
             </div>
         </div>
@@ -219,16 +286,15 @@ jQuery(async () => {
         : $('#extensions_settings');
     $container.append(settingsHtml);
 
-    $('#name_override_char').on('input', function () {
-        saveOverrides($(this).val(), $('#name_override_user').val());
-    });
-    $('#name_override_user').on('input', function () {
-        saveOverrides($('#name_override_char').val(), $(this).val());
-    });
+    $('#name_override_char').on('input', onSettingsInput);
+    $('#name_override_user').on('input', onSettingsInput);
 
-    eventSource.on(event_types.CHAT_CHANGED, updateUI);
-    eventSource.on(event_types.GENERATION_ENDED, onGenerationEnded);
+    eventSource.on(event_types.CHAT_CHANGED, onChatChanged);
 
-    dbg('Extension loaded OK!');
+    // Also clean up if page unloads
+    window.addEventListener('beforeunload', restoreCharacterName);
+
+    dbg('Extension loaded OK');
+    applyAllOverrides();
     updateUI();
 });
