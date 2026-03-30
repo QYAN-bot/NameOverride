@@ -1,9 +1,9 @@
 /**
- * Name Override — SillyTavern Extension v6
+ * Name Override — SillyTavern Extension v6.1
  *
- * Adds a button next to the input box. Click it to replace
- * {{char}} and {{user}} in your message with custom names.
- * Settings saved per character card.
+ * Adds a "Replace Names" item to the Magic Wand (extensions) menu.
+ * Click it to replace {{char}} and {{user}} in your message with
+ * custom names before sending. Settings saved per character card.
  */
 
 const MODULE_NAME = 'name_override';
@@ -48,13 +48,9 @@ function doReplace() {
     const newChar = charName?.trim();
     const newUser = userName?.trim();
 
-    // Also support the original card name as fallback source
-    const ctx = SillyTavern.getContext();
-
     let changed = false;
 
     if (newChar) {
-        // Replace {{char}} (case-insensitive)
         const re = /\{\{char\}\}/gi;
         if (re.test(text)) {
             text = text.replace(re, newChar);
@@ -92,6 +88,58 @@ function updateUI() {
     }
 }
 
+function addWandMenuItem() {
+    // The wand menu item — uses the same HTML pattern as ST's built-in
+    // extension menu items (a list-group-item inside the wand container)
+    const menuItemHtml = `
+        <div id="name_override_wand_btn" class="list-group-item flex-container flexGap5"
+             title="Replace {{char}}/{{user}} in input with custom names">
+            <i class="fa-solid fa-arrow-right-arrow-left extensionsMenuExtensionButton"></i>
+            Replace Names
+        </div>`;
+
+    // Try known wand menu containers (varies by ST version)
+    const wandSelectors = [
+        '#extensionsMenu',                       // Common in many versions
+        '#extensions_wand_container',             // Some versions
+        '.extensions_block .dropdown-menu',       // Dropdown style
+        '#leftSendForm .dropdown-menu',           // Left send form dropdown
+    ];
+
+    let placed = false;
+    for (const sel of wandSelectors) {
+        const $container = $(sel);
+        if ($container.length) {
+            $container.append(menuItemHtml);
+            placed = true;
+            console.log(`[${MODULE_NAME}] Wand menu item added to ${sel}`);
+            break;
+        }
+    }
+
+    if (!placed) {
+        // Fallback: look for any container that already has wand-style items
+        const $existingItems = $('.extensionsMenuExtensionButton').first().closest('[class*="menu"], [class*="container"], [class*="dropdown"]');
+        if ($existingItems.length) {
+            $existingItems.append(menuItemHtml);
+            placed = true;
+            console.log(`[${MODULE_NAME}] Wand menu item added via fallback parent`);
+        }
+    }
+
+    if (!placed) {
+        // Last resort: tiny icon button before send, but styled to match ST
+        const $btn = $(`<div id="name_override_wand_btn" class="fa-solid fa-arrow-right-arrow-left interactable"
+            title="Replace {{char}}/{{user}} with custom names"
+            style="cursor:pointer; padding:3px; opacity:0.6; font-size:0.8em;"></div>`);
+        $('#send_but').before($btn);
+        console.log(`[${MODULE_NAME}] Fallback: small button added near send`);
+    }
+
+    // Bind click
+    $(document).on('click', '#name_override_wand_btn', doReplace);
+}
+
 // ── init ─────────────────────────────────────────────────────────────
 
 jQuery(async () => {
@@ -118,7 +166,8 @@ jQuery(async () => {
                     <input id="name_override_user" type="text" class="text_pole" />
                 </div>
                 <small class="name_override_hint">
-                    Type {{char}} / {{user}} in chat, then click the 🔄 button to replace.
+                    Type {{char}}/{{user}} in chat, then use the wand menu
+                    "Replace Names" to swap them before sending.
                 </small>
             </div>
         </div>
@@ -136,24 +185,9 @@ jQuery(async () => {
         saveOverrides($('#name_override_char').val(), $(this).val());
     });
 
-    // ── Replace button next to send ──
-    const $btn = $(`
-        <div id="name_override_btn" class="fa-solid fa-arrow-right-arrow-left"
-             title="Replace {{char}}/{{user}} with custom names">
-        </div>
-    `);
-    // Insert before the send button
-    const $sendBtn = $('#send_but');
-    if ($sendBtn.length) {
-        $sendBtn.before($btn);
-    } else {
-        // Fallback: append to the input area
-        $('#send_form').append($btn);
-    }
+    // Add the wand menu item
+    addWandMenuItem();
 
-    $btn.on('click', doReplace);
-
-    // Sync settings when switching characters
     eventSource.on(event_types.CHAT_CHANGED, updateUI);
 
     console.log(`[${MODULE_NAME}] loaded`);
