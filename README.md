@@ -1,30 +1,16 @@
-# Name Override — SillyTavern Extension
+# Name Override
 
-Manually set custom replacement values for `{{char}}` and `{{user}}` in the prompt sent to the API. Settings are saved per character card.
+SillyTavern 扩展。在输入框里用 `{{char}}` / `{{user}}` 当占位符，发送前一键替换成自定义名字。
 
-## Install
+## 安装
 
-### Option A: Via ST's built-in installer
-1. Open SillyTavern → Extensions → Install Extension
-2. Paste this folder's URL or path
+Extensions → Install Extension → 粘贴仓库地址
 
-### Option B: Manual
-1. Copy the `name-override` folder into your ST third-party extensions directory:
-   - **Linux / Termux**: `SillyTavern/data/default-user/extensions/third-party/name-override/`
-   - If the above doesn't work, try: `SillyTavern/public/scripts/extensions/third-party/name-override/`
-2. Restart SillyTavern
-3. Go to Extensions panel → enable "Name Override"
+## 用法
 
-## Usage
+1. Extensions 面板 → **Name Override** → 填 char / user 的替换名（按角色卡记忆）
+2. 聊天框里打 `{{char}}` 或 `{{user}}`
+3. 点魔棒菜单 → **Replace Names**
+4. 输入框文字被替换，确认后发送
 
-1. Open a chat with a character
-2. In the Extensions panel, expand **Name Override**
-3. Type the replacement name in the `{{char}} →` or `{{user}} →` field
-4. Leave empty to use the default name
-
-The replacement happens in the prompt sent to the API only — the UI still shows the original names.
-
-## Troubleshooting
-
-- **Extension doesn't appear**: Check the browser console (F12) for import errors. The relative import paths in `index.js` may need adjustment depending on your ST version. Look for the comment block at the top of `index.js`.
-- **Names not being replaced**: Open browser console and check for `[name-override] loaded`. If it loaded but replacements aren't working, the event names may differ in your ST version — check `event_types` in the console.
+留空 = 不替换。
