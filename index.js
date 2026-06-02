@@ -1,9 +1,9 @@
 /**
- * Name Override — SillyTavern Extension v6.1
+ * Name Override — SillyTavern Extension v7
  *
- * Adds a "Replace Names" item to the Magic Wand (extensions) menu.
- * Click it to replace {{char}} and {{user}} in your message with
- * custom names before sending. Settings saved per character card.
+ * 在输入框中替换 char/user 占位符为自定义名字。
+ * 支持三种格式级联检测：{{char}} → <char> → char（纯文本）
+ * 设置按角色卡独立记忆。
  */
 
 const MODULE_NAME = 'name_override';
@@ -35,7 +35,36 @@ function saveOverrides(charName, userName) {
     SillyTavern.getContext().saveSettingsDebounced();
 }
 
-// ── core: replace text in input box ──────────────────────────────────
+// ── core: cascading replacement ──────────────────────────────────────
+// For each keyword (char / user), try formats in order:
+//   1. {{keyword}}  — most specific, lowest false-positive risk
+//   2. <keyword>    — medium specificity
+//   3. keyword      — plain word boundary match, most aggressive
+// Stops at the first format that matches.
+
+function tryReplace(text, keyword, replacement) {
+    if (!replacement) return { text, changed: false, format: null };
+
+    // 1. {{keyword}}
+    const re1 = new RegExp(`\\{\\{${keyword}\\}\\}`, 'gi');
+    if (re1.test(text)) {
+        return { text: text.replace(re1, replacement), changed: true, format: `{{${keyword}}}` };
+    }
+
+    // 2. <keyword>
+    const re2 = new RegExp(`<${keyword}>`, 'gi');
+    if (re2.test(text)) {
+        return { text: text.replace(re2, replacement), changed: true, format: `<${keyword}>` };
+    }
+
+    // 3. plain word (word boundary)
+    const re3 = new RegExp(`\\b${keyword}\\b`, 'g');
+    if (re3.test(text)) {
+        return { text: text.replace(re3, replacement), changed: true, format: keyword };
+    }
+
+    return { text, changed: false, format: null };
+}
 
 function doReplace() {
     const $input = $('#send_textarea');
@@ -48,29 +77,26 @@ function doReplace() {
     const newChar = charName?.trim();
     const newUser = userName?.trim();
 
-    let changed = false;
-
-    if (newChar) {
-        const re = /\{\{char\}\}/gi;
-        if (re.test(text)) {
-            text = text.replace(re, newChar);
-            changed = true;
-        }
+    if (!newChar && !newUser) {
+        toastr.warning('未设置替换名', '名称替换', { timeOut: 2000 });
+        return;
     }
 
-    if (newUser) {
-        const re = /\{\{user\}\}/gi;
-        if (re.test(text)) {
-            text = text.replace(re, newUser);
-            changed = true;
-        }
-    }
+    const formats = [];
 
-    if (changed) {
+    const charResult = tryReplace(text, 'char', newChar);
+    text = charResult.text;
+    if (charResult.changed) formats.push(`${charResult.format} → ${newChar}`);
+
+    const userResult = tryReplace(text, 'user', newUser);
+    text = userResult.text;
+    if (userResult.changed) formats.push(`${userResult.format} → ${newUser}`);
+
+    if (formats.length > 0) {
         $input.val(text).trigger('input');
-        toastr.success('Names replaced!', 'Name Override', { timeOut: 1500 });
+        toastr.success(formats.join('，'), '名称替换', { timeOut: 2500 });
     } else {
-        toastr.warning('No {{char}}/{{user}} found, or no names set', 'Name Override', { timeOut: 2000 });
+        toastr.warning('未检测到 char/user 占位符', '名称替换', { timeOut: 2000 });
     }
 }
 
@@ -89,21 +115,18 @@ function updateUI() {
 }
 
 function addWandMenuItem() {
-    // The wand menu item — uses the same HTML pattern as ST's built-in
-    // extension menu items (a list-group-item inside the wand container)
     const menuItemHtml = `
         <div id="name_override_wand_btn" class="list-group-item flex-container flexGap5"
-             title="Replace {{char}}/{{user}} in input with custom names">
+             title="替换输入框中的 char/user 占位符">
             <i class="fa-solid fa-arrow-right-arrow-left extensionsMenuExtensionButton"></i>
-            Replace Names
+            名称替换
         </div>`;
 
-    // Try known wand menu containers (varies by ST version)
     const wandSelectors = [
-        '#extensionsMenu',                       // Common in many versions
-        '#extensions_wand_container',             // Some versions
-        '.extensions_block .dropdown-menu',       // Dropdown style
-        '#leftSendForm .dropdown-menu',           // Left send form dropdown
+        '#extensionsMenu',
+        '#extensions_wand_container',
+        '.extensions_block .dropdown-menu',
+        '#leftSendForm .dropdown-menu',
     ];
 
     let placed = false;
@@ -112,31 +135,25 @@ function addWandMenuItem() {
         if ($container.length) {
             $container.append(menuItemHtml);
             placed = true;
-            console.log(`[${MODULE_NAME}] Wand menu item added to ${sel}`);
             break;
         }
     }
 
     if (!placed) {
-        // Fallback: look for any container that already has wand-style items
-        const $existingItems = $('.extensionsMenuExtensionButton').first().closest('[class*="menu"], [class*="container"], [class*="dropdown"]');
-        if ($existingItems.length) {
-            $existingItems.append(menuItemHtml);
+        const $parent = $('.extensionsMenuExtensionButton').first()
+            .closest('[class*="menu"], [class*="container"], [class*="dropdown"]');
+        if ($parent.length) {
+            $parent.append(menuItemHtml);
             placed = true;
-            console.log(`[${MODULE_NAME}] Wand menu item added via fallback parent`);
         }
     }
 
     if (!placed) {
-        // Last resort: tiny icon button before send, but styled to match ST
         const $btn = $(`<div id="name_override_wand_btn" class="fa-solid fa-arrow-right-arrow-left interactable"
-            title="Replace {{char}}/{{user}} with custom names"
-            style="cursor:pointer; padding:3px; opacity:0.6; font-size:0.8em;"></div>`);
+            title="名称替换" style="cursor:pointer; padding:3px; opacity:0.6; font-size:0.8em;"></div>`);
         $('#send_but').before($btn);
-        console.log(`[${MODULE_NAME}] Fallback: small button added near send`);
     }
 
-    // Bind click
     $(document).on('click', '#name_override_wand_btn', doReplace);
 }
 
@@ -148,12 +165,11 @@ jQuery(async () => {
 
     getSettings();
 
-    // ── Settings panel ──
     const settingsHtml = `
     <div id="name_override_settings">
         <div class="inline-drawer">
             <div class="inline-drawer-toggle inline-drawer-header">
-                <b>Name Override</b>
+                <b>名称替换设置</b>
                 <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
             </div>
             <div class="inline-drawer-content">
@@ -166,8 +182,8 @@ jQuery(async () => {
                     <input id="name_override_user" type="text" class="text_pole" />
                 </div>
                 <small class="name_override_hint">
-                    Type {{char}}/{{user}} in chat, then use the wand menu
-                    "Replace Names" to swap them before sending.
+                    输入后在魔棒菜单内选择「名称替换」即可。
+                    支持三种格式：<code>{{char}}</code>、<code>&lt;char&gt;</code>、<code>char</code>
                 </small>
             </div>
         </div>
@@ -185,9 +201,7 @@ jQuery(async () => {
         saveOverrides($('#name_override_char').val(), $(this).val());
     });
 
-    // Add the wand menu item
     addWandMenuItem();
-
     eventSource.on(event_types.CHAT_CHANGED, updateUI);
 
     console.log(`[${MODULE_NAME}] loaded`);

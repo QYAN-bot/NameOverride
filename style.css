@@ -20,9 +20,13 @@
     display: block;
     opacity: 0.6;
     margin-top: 4px;
+    line-height: 1.5;
 }
 
-/* Wand menu item styling */
+#name_override_settings .name_override_hint code {
+    opacity: 0.9;
+}
+
 #name_override_wand_btn {
     cursor: pointer;
 }
