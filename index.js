@@ -58,7 +58,7 @@ function tryReplace(text, keyword, replacement) {
     }
 
     // 3. plain word (word boundary)
-    const re3 = new RegExp(`\\b${keyword}\\b`, 'g');
+    const re3 = new RegExp(`\\b${keyword}\\b`, 'gi');
     if (re3.test(text)) {
         return { text: text.replace(re3, replacement), changed: true, format: keyword };
     }
